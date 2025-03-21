@@ -11,6 +11,8 @@ from datetime import datetime
 import traceback
 import time
 import random
+from collections import defaultdict
+import time
 
 # Füge direkt nach den Imports folgende Zeilen ein
 # Lade die Umgebungsvariablen aus der .env-Datei
@@ -119,6 +121,15 @@ class MuslimAssistant:
             
         # Lade den aktiven Status für alle Chats
         self.load_active_chats()
+        
+        # Add rate limiting variables
+        self.last_api_call = defaultdict(float)  # Track last API call time per chat
+        self.cooldown_period = 5.0  # Seconds between API calls for the same chat
+        self.global_last_call = 0  # Last API call across all chats
+        self.global_cooldown = 0.5  # Minimum time between any API calls
+        
+        # Add permission tracking
+        self.permission_denied_chats = set()  # Track chats where we can't write
     
     def save_active_chats(self):
         """Speichert den aktiven Status für alle Chats"""
@@ -193,6 +204,24 @@ class MuslimAssistant:
         """Verarbeitet eingehende Nachrichten und generiert Antworten mit Gemini"""
         try:
             chat_id_str = str(chat_id)
+            
+            # Skip processing for chats where we know we don't have permission
+            if chat_id in self.permission_denied_chats:
+                logger.debug(f"Skipping chat {chat_id} due to known permission issues")
+                return None
+                
+            # Rate limiting check - per chat
+            current_time = time.time()
+            time_since_last_call = current_time - self.last_api_call[chat_id_str]
+            if time_since_last_call < self.cooldown_period and not is_outgoing:
+                logger.info(f"Rate limiting: Skipping message in chat {chat_id}, cooldown active ({time_since_last_call:.2f}s < {self.cooldown_period}s)")
+                return None
+                
+            # Rate limiting check - global
+            time_since_global = current_time - self.global_last_call
+            if time_since_global < self.global_cooldown and not is_outgoing:
+                logger.info(f"Global rate limiting active ({time_since_global:.2f}s < {self.global_cooldown}s)")
+                return None
             
             # Überprüfe, ob der Bot deaktiviert werden soll - case insensitive
             if message_text.lower() in ["stop", "assistent stop"] and not is_outgoing:
@@ -341,16 +370,23 @@ WICHTIG: Verwende keine Signatur oder nenne deinen Namen in deinen Antworten. Se
                     # Lade das Gedächtnis für diesen Chat
                     self.load_memory(chat_id)
                     
-                    # Verarbeite die Nachricht
+                    # Process the message
                     response = await self.process_message(chat_id, event.text, sender_info, chat_type=chat_type)
+                    
+                    # Send a response if one was generated
+                    if response:
+                        try:
+                            logger.info(f"Attempting to send response to chat {chat_id}")
+                            await event.respond(response, parse_mode='md')
+                            logger.info(f"Response sent successfully to chat {chat_id}")
+                        except errors.ChatWriteForbiddenError:
+                            self.permission_denied_chats.add(chat_id)
+                            logger.warning(f"No permission to write in chat {chat_id}, marked as forbidden")
+                        except Exception as e:
+                            logger.error(f"Error sending message to chat {chat_id}: {e}")
                     
                     # Speichere das aktualisierte Gedächtnis
                     self.save_memory(chat_id)
-                    
-                    # Sende eine Antwort, wenn eine generiert wurde
-                    if response:
-                        logger.info(f"Sende Antwort an Chat {chat_id}: {response[:50]}...")
-                        await event.respond(response, parse_mode='md')
                         
                 except Exception as e:
                     logger.error(f"Fehler beim Verarbeiten einer eingehenden Nachricht: {e}")
@@ -450,6 +486,29 @@ WICHTIG: Verwende keine Signatur oder nenne deinen Namen in deinen Antworten. Se
         
         # Halte den Client am Laufen
         await self.client.run_until_disconnected()
+
+    # Add this function to check if the bot should respond to a message:
+    def should_respond(self, event, chat_id, chat_type):
+        # Don't respond if chat is in permission denied list
+        if chat_id in self.permission_denied_chats:
+            return False
+            
+        # Always respond in private chats
+        if chat_type == "private":
+            return True
+            
+        # In groups/channels, only respond if:
+        # 1. Bot is mentioned
+        # 2. Message is a reply to a message from the bot
+        # 3. Bot is admin in the chat and has appropriate settings enabled
+        if chat_type in ["group", "channel"]:
+            is_mentioned = False
+            if hasattr(event.message, 'mentioned') and event.message.mentioned:
+                is_mentioned = True
+                
+            return is_mentioned  # Can expand this with more conditions
+            
+        return False
 
 async def main():
     # Benutzer nach den Anmeldeinformationen fragen
