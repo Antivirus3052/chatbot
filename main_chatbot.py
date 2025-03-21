@@ -319,14 +319,46 @@ WICHTIG: Verwende keine Signatur oder nenne deinen Namen in deinen Antworten. Se
     async def connect_client(self):
         try:
             if self.client is None:
-                self.client = TelegramClient("muslim_assistant", self.telegram_api_id, self.telegram_api_hash)
+                session_name = f"session_{self.phone.replace('+', '')}"
+                self.client = TelegramClient(session_name, self.telegram_api_id, self.telegram_api_hash)
                 self.client.parse_mode = 'md'
             
-            # First connect and authenticate
-            await self.client.start(phone=self.phone)
+            # Enhanced authentication process
+            logger.info("Starting enhanced Telegram authentication...")
             
-            # THEN set up notification settings (after connection is established)
-            # This was causing the error - sending request while disconnected
+            # Define custom callback for phone code
+            async def code_callback():
+                print("\n-------------------------------")
+                print("Telegram code requested!")
+                print("Please check your Telegram app for the code.")
+                print("The code should be 5 digits without spaces.")
+                for attempt in range(3):
+                    code = input("Enter the Telegram code (or type 'retry' to request new code): ")
+                    if code.lower() == 'retry':
+                        logger.info("User requested new code")
+                        return None  # This will trigger a code resend
+                    if code.strip():
+                        return code.strip()  # Remove any whitespace
+                return None
+                
+            # Define password callback for 2FA
+            async def password_callback():
+                print("\n-------------------------------")
+                print("Two-Factor Authentication detected!")
+                return input("Please enter your Telegram 2FA password: ")
+            
+            # Start with custom callbacks for better authentication flow
+            await self.client.start(
+                phone=self.phone,
+                code_callback=code_callback,
+                password_callback=password_callback
+            )
+            
+            # Test the connection with a simple request
+            me = await self.client.get_me()
+            logger.info(f"Successfully connected as: {me.first_name} (ID: {me.id})")
+            
+            # Rest of your connect_client code...
             try:
                 await self.client(functions.account.UpdateNotifySettingsRequest(
                     peer="all",
